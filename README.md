@@ -122,6 +122,21 @@ Comprueba las 4 esquinas, el promedio global y el gradiente térmico ($\Delta T$
 python scripts/verify_orion.py --host <IP-PUBLICA-EC2>
 ```
 
+### 6. Ejecutar el Pipeline ETL y Activar Suscripción
+El Pipeline ETL recibe notificaciones automáticas de Orion ante cambios de contexto, calcula la Sensación Térmica (NOAA), Punto de Rocío (Magnus-Tetens) y persiste en SQLite WAL:
+
+1. **Iniciar el Worker ETL (en la EC2):**
+   ```bash
+   python3 -m uvicorn etl.main:app --host 0.0.0.0 --port 8000
+   ```
+2. **Registrar la Suscripción Webhook en Orion (en otra terminal):**
+   ```bash
+   python3 scripts/subscribe_orion.py
+   ```
+3. **Consultar la API de Estado y Diagnóstico:**
+   * En tu navegador: `http://<IP-PUBLICA-EC2>:8000/docs` (Swagger UI interactivo)
+   * Estado consolidado de la sala: `http://<IP-PUBLICA-EC2>:8000/api/status`
+
 ---
 
 ## 🔌 Firmware del Hardware con PlatformIO

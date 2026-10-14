@@ -23,6 +23,8 @@ services:
       - "${ORION_PORT:-1026}:1026"
     networks:
       - fiware-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: -dbhost mongo-db -logLevel INFO -corsOrigin __ALL -forbiddenDatamodelChars ""
 
   # FIWARE IoT Agent para JSON (Traductor de Telemetría HTTP/JSON a NGSI-v2)
