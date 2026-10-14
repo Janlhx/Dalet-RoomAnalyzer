@@ -29,25 +29,25 @@ CORNER_DEVICES = [
     {
         "device_id": "hdc1080_nw",
         "entity_name": "Room:01:Corner:NW",
-        "corner_label": "Noroeste (Ventana / Fachada)",
+        "corner_label": "Noroeste - Ventana",
         "corner_code": "NW"
     },
     {
         "device_id": "hdc1080_ne",
         "entity_name": "Room:01:Corner:NE",
-        "corner_label": "Noreste (Puerta de Acceso)",
+        "corner_label": "Noreste - Puerta",
         "corner_code": "NE"
     },
     {
         "device_id": "hdc1080_sw",
         "entity_name": "Room:01:Corner:SW",
-        "corner_label": "Suroeste (Zona de Servidores/Equipos)",
+        "corner_label": "Suroeste - Servidores",
         "corner_code": "SW"
     },
     {
         "device_id": "hdc1080_se",
         "entity_name": "Room:01:Corner:SE",
-        "corner_label": "Sureste (Zona Climatizada)",
+        "corner_label": "Sureste - Climatizador",
         "corner_code": "SE"
     },
     # Dispositivo base para retrocompatibilidad
