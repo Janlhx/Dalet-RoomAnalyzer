@@ -1,0 +1,62 @@
+services:
+  # Base de Datos MongoDB para Orion Context Broker e IoT Agent
+  mongo-db:
+    image: mongo:5.0
+    container_name: dalet-mongo
+    restart: always
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - fiware-net
+    command: --nojournal
+
+  # FIWARE Orion Context Broker (Gestor de Contexto NGSI-v2)
+  fiware-orion:
+    image: telefonicaiot/fiware-orion:3.11.0
+    container_name: dalet-orion
+    restart: always
+    depends_on:
+      - mongo-db
+    ports:
+      - "${ORION_PORT:-1026}:1026"
+    networks:
+      - fiware-net
+    command: -dbhost mongo-db -logLevel INFO -corsOrigin __ALL
+
+  # FIWARE IoT Agent para JSON (Traductor de Telemetría HTTP/JSON a NGSI-v2)
+  fiware-iot-agent-json:
+    image: telefonicaiot/iotagent-json:3.3.0
+    container_name: dalet-iot-agent-json
+    restart: always
+    depends_on:
+      - mongo-db
+      - fiware-orion
+    ports:
+      - "${IOTA_NORTH_PORT:-4041}:4041" # Puerto de Gestión / Aprovisionamiento
+      - "${IOTA_SOUTH_PORT:-7896}:7896" # Puerto de Recepción de Telemetría IoT
+    networks:
+      - fiware-net
+    environment:
+      - IOTA_CB_HOST=fiware-orion
+      - IOTA_CB_PORT=1026
+      - IOTA_NORTH_PORT=4041
+      - IOTA_REGISTRY_TYPE=mongodb
+      - IOTA_MONGO_HOST=mongo-db
+      - IOTA_MONGO_PORT=27017
+      - IOTA_MONGO_DB=iotagentjson
+      - IOTA_HTTP_PORT=7896
+      - IOTA_PROVIDER_URL=http://fiware-iot-agent-json:4041
+      - IOTA_DEFAULT_RESOURCE=/iot/json
+      - IOTA_CB_NGSI_VERSION=v2
+      - IOTA_AUTOCACHE=true
+      - IOTA_LOG_LEVEL=INFO
+
+volumes:
+  mongo-data:
+    name: dalet_mongo_data
+
+networks:
+  fiware-net:
+    name: dalet_fiware_network
