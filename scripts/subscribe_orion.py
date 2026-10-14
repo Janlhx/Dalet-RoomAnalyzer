@@ -3,15 +3,17 @@
 scripts/subscribe_orion.py
 Crea y verifica la Suscripción Webhook en FIWARE Orion Context Broker
 para enviar notificaciones al Pipeline ETL cuando cambien temperatura o humedad.
+Detecta automáticamente la IP local/host para que el contenedor de Orion
+pueda notificar al worker FastAPI sin problemas de resolución.
 """
 
 import sys
 import json
+import socket
 import argparse
 import requests
 
 DEFAULT_ORION_URL = "http://localhost:1026"
-DEFAULT_ETL_URL = "http://host.docker.internal:8000/v1/notify"
 FIWARE_SERVICE = "openiot"
 FIWARE_SERVICE_PATH = "/"
 
@@ -20,6 +22,17 @@ HEADERS = {
     "fiware-servicepath": FIWARE_SERVICE_PATH,
     "Content-Type": "application/json"
 }
+
+def detect_host_ip() -> str:
+    """Detecta la IP local de la máquina (ej. 172.31.19.184 en AWS EC2)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "172.17.0.1"
 
 def clean_old_subscriptions(orion_url: str):
     """Elimina suscripciones anteriores para evitar duplicados."""
@@ -39,8 +52,8 @@ def clean_old_subscriptions(orion_url: str):
 def create_subscription(orion_url: str, etl_webhook_url: str):
     print("=" * 65)
     print("🏛️  DALET-ROOMANALYZER — REGISTRO DE SUSCRIPCIÓN EN ORION")
-    print(f"📡 Orion:  {orion_url}")
-    print(f"🎯 Destino Webhook ETL: {etl_webhook_url}")
+    print(f"📡 Orion Context Broker: {orion_url}")
+    print(f"🎯 Destino Webhook ETL:  {etl_webhook_url}")
     print("=" * 65)
 
     clean_old_subscriptions(orion_url)
@@ -79,7 +92,7 @@ def create_subscription(orion_url: str, etl_webhook_url: str):
         if resp.status_code == 201:
             sub_id = resp.headers.get("Location", "").split("/")[-1]
             print(f"\n✅ Suscripción creada exitosamente!")
-            print(f"  • ID de Suscripción: {sub_id}")
+            print(f"  • ID de Suscripción:     {sub_id}")
             print(f"  • Entidades monitoreadas: type='Room' (todas las esquinas)")
             print(f"  • Atributos detonantes:  ['temperature', 'relativeHumidity']")
             print(f"  • URL de Notificación:   {etl_webhook_url}")
@@ -104,10 +117,13 @@ def list_subscriptions(orion_url: str):
         print(f"⚠️ Error al listar suscripciones: {e}")
 
 def main():
+    detected_ip = detect_host_ip()
+    default_webhook = f"http://{detected_ip}:8000/v1/notify"
+
     parser = argparse.ArgumentParser(description="Registrar suscripción de Orion hacia el ETL Worker")
     parser.add_argument("--host", default="localhost", help="Host de Orion Context Broker (default: localhost)")
     parser.add_argument("--orion-port", type=int, default=1026, help="Puerto de Orion (default: 1026)")
-    parser.add_argument("--etl-url", default=DEFAULT_ETL_URL, help=f"URL del Webhook receptor (default: {DEFAULT_ETL_URL})")
+    parser.add_argument("--etl-url", default=default_webhook, help=f"URL del Webhook receptor (default: {default_webhook})")
     
     args = parser.parse_args()
     orion_url = f"http://{args.host}:{args.orion_port}"
