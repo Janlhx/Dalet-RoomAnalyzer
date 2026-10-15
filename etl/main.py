@@ -10,10 +10,28 @@ Servicio Worker ETL y API REST para Dalet-RoomAnalyzer (FastAPI).
 
 import sys
 import logging
-from typing import Dict, Any, List
-from fastapi import FastAPI, Request, status
+from typing import Dict, Any, List, Optional
+from pydantic import BaseModel, Field
+from fastapi import FastAPI, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+class OrionNotification(BaseModel):
+    subscriptionId: Optional[str] = "sub_orion_room_01"
+    data: List[Dict[str, Any]] = Field(
+        default=[
+            {
+                "id": "Room:01:Corner:NW",
+                "type": "Room",
+                "temperature": {"type": "Number", "value": 26.5},
+                "relativeHumidity": {"type": "Number", "value": 55.0},
+                "presence": {"type": "Integer", "value": 1},
+                "cornerLabel": {"type": "Text", "value": "Noroeste - Ventana"},
+                "cornerCode": {"type": "Text", "value": "NW"}
+            }
+        ],
+        description="Lista de entidades enviadas por la suscripción NGSI-v2 de Orion"
+    )
 
 from etl.formulas import calculate_dew_point, calculate_heat_index, assess_condensation_risk, classify_comfort
 from etl.database import (
@@ -53,18 +71,12 @@ def health_check():
 # 📥 1. EXTRACT & TRANSFORM: Webhook Receptor de Orion Context Broker
 # ==============================================================================
 @app.post("/v1/notify", status_code=status.HTTP_200_OK)
-async def orion_notify_webhook(request: Request):
+async def orion_notify_webhook(payload: OrionNotification):
     """
     Endpoint que recibe el webhook NGSI-v2 desde Orion Context Broker
     cada vez que un sensor actualiza sus valores de temperatura o humedad.
     """
-    try:
-        body = await request.json()
-    except Exception as e:
-        logger.error(f"❌ Error al decodificar JSON del webhook: {e}")
-        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
-
-    data_list = body.get("data", [])
+    data_list = payload.data if payload and payload.data else []
     if not data_list:
         return {"status": "ignored", "reason": "No data in notification"}
 
