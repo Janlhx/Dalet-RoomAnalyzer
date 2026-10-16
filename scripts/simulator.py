@@ -121,6 +121,10 @@ def run_simulation(args):
             else:
                 print(f"  ❌ {nid:<12} Error ({status}): {body}")
 
+            # Pequeño retardo entre esquinas para simular la transmisión asíncrona de 4 nodos físicos
+            if args.all_corners:
+                time.sleep(0.3)
+
         if args.once:
             break
 

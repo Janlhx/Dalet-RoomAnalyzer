@@ -72,8 +72,7 @@ def subscribe_quantumleap(orion_url: str, ql_url: str):
                 "presence"
             ],
             "metadata": ["dateCreated", "dateModified"]
-        },
-        "throttling": 1
+        }
     }
 
     url = f"{orion_url}/v2/subscriptions"
@@ -117,8 +116,7 @@ def subscribe_etl(orion_url: str, etl_webhook_url: str):
                 "cornerLabel",
                 "cornerCode"
             ]
-        },
-        "throttling": 1
+        }
     }
 
     url = f"{orion_url}/v2/subscriptions"

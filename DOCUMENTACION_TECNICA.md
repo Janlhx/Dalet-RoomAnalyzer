@@ -17,12 +17,15 @@
 8. [Manual de Pruebas y Validación con Comandos cURL](#8-manual-de-pruebas-y-validación-con-comandos-curl)
 9. [Core de Seguridad y Cadena de Escritura: ¿Por qué un Agente y no Orion Directo?](#9-core-de-seguridad-y-cadena-de-escritura)
 10. [Mecánica Cloud en AWS y Muestra de Datos](#10-mecánica-cloud-en-aws-y-muestra-de-datos)
+11. [Capa 6: Persistencia Histórica de Series Temporales (QuantumLeap y CrateDB)](#11-capa-6-persistencia-histórica-de-series-temporales-quantumleap-y-cratedb)
+12. [El Origen Telefónica / FIWARE y Referencias de Ingeniería](#12-el-origen-telefónica--fiware-y-referencias-de-ingeniería)
+13. [Guía Rápida de Sustentación para el Profesor](#13-guía-rápida-de-sustentación-para-el-profesor)
 
 ---
 
 ## 1. Arquitectura Global y Flujo de Datos
 
-El sistema adopta la arquitectura de referencia europea para ciudades y edificios inteligentes (**FIWARE**), garantizando el desacoplamiento total entre los sensores en el borde (*Edge*) y el procesamiento analítico en la nube (*Cloud*).
+El sistema adopta la arquitectura de referencia europea para ciudades y edificios inteligentes (**FIWARE**), garantizando el desacoplamiento total entre los sensores en el borde (*Edge*) y el procesamiento analítico y de persistencia histórica en la nube (*Cloud*).
 
 ### 1.1 Diagrama de Bloques del Sistema
 
@@ -47,26 +50,24 @@ El sistema adopta la arquitectura de referencia europea para ciudades y edificio
        │                                                              │
        │  [ ORION CONTEXT BROKER (:1026) ] ◄──► [ MongoDB 5.0 ]       │
        │    • Mantiene estado vivo: Room:01:Corner:NW/NE/SW/SE        │
-       │    • Gestiona Suscripciones reactivas (Webhooks)             │
-       └──────────────────────────────┬───────────────────────────────┘
-                                      │
-                                      │ 2. Webhook NGSI-v2 /v1/notify
-                                      ▼
-       ┌──────────────────────────────────────────────────────────────┐
-       │             CAPA ANALÍTICA Y DECISIÓN (ETL)                  │
-       │                                                              │
-       │  [ PIPELINE ETL (FastAPI :8000) ]                            │
-       │    • EXTRACT:   Limpieza y filtrado de anomalías             │
-       │    • TRANSFORM: Sensación Térmica (Fórmula Rothfusz/NOAA)    │
-       │                 Punto de Rocío (Fórmula Magnus-Tetens)       │
-       │                 Gradiente Térmico Espacial (ΔT = Tmax-Tmin)  │
-       │                 Detección de tasa de cambio rápido           │
-       │    • LOAD:      Persistencia en SQLite (Modo WAL)            │
-       │                                                              │
-       │  [ API REST (:8000/api/status, /api/history, /docs) ]        │
-       │    • Alimenta Frontends de Gestión y Usuario                 │
-       │    • Consultada por el Asistente por Voz con IA (Dalet)      │
-       └──────────────────────────────────────────────────────────────┘
+       │    • Dispara Suscripciones reactivas (Webhooks concurrentes) │
+       └──────────────┬───────────────────────────────┬───────────────┘
+                      │                               │
+                      │ 2a. Suscripción NGSI-v2       │ 2b. Suscripción NGSI-v2
+                      │     /v1/notify                │     /v2/notify
+                      ▼                               ▼
+       ┌──────────────────────────────┐┌──────────────────────────────┐
+       │     PIPELINE ANALÍTICO ETL   ││   SERIES TEMPORALES HISTÓRICAS│
+       │     (FastAPI :8000)          ││   (QuantumLeap + CrateDB)    │
+       │                              ││                              │
+       │ • EXTRACT: Filtro anomalías  ││ • QUANTUMLEAP (:8668)        │
+       │ • TRANSFORM:                 ││   Traductor NGSI a registros │
+       │   - Heat Index (Rothfusz)    ││   relacionales con timestamp │
+       │   - Dew Point (Magnus-Tetens)││                              │
+       │   - Gradiente espacial (ΔT)  ││ • CRATEDB (:4200 / :5432)    │
+       │ • LOAD: SQLite WAL           ││   Motor SQL distribuido      │
+       │ • API REST & Swagger (/docs) ││   Tabla: mtopeniot.etroom    │
+       └──────────────────────────────┘└──────────────────────────────┘
 ```
 
 ### 1.2 Diagrama de Secuencia Temporal de una Lectura
@@ -78,20 +79,24 @@ sequenceDiagram
     participant IoTA as IoT Agent JSON (:7896)
     participant Orion as Orion Context Broker (:1026)
     participant Mongo as MongoDB (:27017)
+    participant QL as QuantumLeap (:8668)
+    participant Crate as CrateDB (:4200)
     participant ETL as Worker ETL (:8000)
     participant DB as SQLite WAL (Analítica)
-    participant Client as Frontend / Dalet AI
 
     ESP32->>ESP32: Lectura I2C HDC1080 (temp, hum)
     ESP32->>IoTA: POST /iot/json?k=dalet_secret_key&i=hdc1080_nw {"t":25.5,"h":58.2}
     IoTA->>IoTA: Mapea {"t"->temperature, "h"->relativeHumidity}
     IoTA->>Orion: PATCH /v2/entities/Room:01:Corner:NW/attrs
-    Orion->>Mongo: Persiste actualización de contexto
-    Orion->>ETL: POST /v1/notify (Webhook NGSI-v2 automático)
-    ETL->>ETL: Calcula Rothfusz Heat Index, Magnus Dew Point, ΔT espacial
-    ETL->>DB: INSERT en sensor_readings y room_spatial_snapshots
-    Client->>ETL: GET /api/status
-    ETL-->>Client: JSON consolidado con semáforo de confort
+    Orion->>Mongo: Persiste actualización de contexto vivo
+    par Notificación Doble Concurrente
+        Orion->>QL: POST /v2/notify (Suscripción QuantumLeap)
+        QL->>Crate: INSERT INTO mtopeniot.etroom (time_index, entity_id, temperature, relativehumidity)
+    and
+        Orion->>ETL: POST /v1/notify (Suscripción ETL)
+        ETL->>ETL: Calcula Rothfusz Heat Index, Magnus Dew Point, ΔT espacial
+        ETL->>DB: INSERT en sensor_readings y room_spatial_snapshots
+    end
 ```
 
 ---
@@ -630,4 +635,186 @@ El sistema transforma la telemetría cruda en **información accionable para la 
 * **Canal 1: API REST (`/api/status` y `/api/history`)**: Formato JSON estructurado para el Frontend Web (Dashboard de Gestión y Usuario).
 * **Canal 2: Documentación Interactiva Swagger UI (`/docs`)**: Permite a desarrolladores, auditores y evaluadores probar los contratos de datos en vivo sin escribir código.
 * **Canal 3: Asistente por Voz con IA (Dalet AI)**: En la siguiente fase, el asistente conversacional invocará mediante *Tool Calling* el endpoint `GET /api/status`, interpretará el JSON en lenguaje natural y le responderá al usuario por voz con Edge-TTS: *"La sala está en 25 grados con sensación de 26. Hay buena distribución entre las esquinas, pero recomiendo abrir la ventilación en la ventana Noroeste"*.
+
+---
+
+## 11. Capa 6: Persistencia Histórica de Series Temporales (QuantumLeap y CrateDB)
+
+### 11.1 El Problema Fundamental: ¿Por qué Orion no guarda historial?
+
+Uno de los conceptos centrales del estándar FIWARE que el evaluador técnico examina es la naturaleza de **Orion Context Broker**:
+* **Orion solo gestiona el *Current State* (Estado Vivo Presente)**.
+* Su base de datos subyacente (MongoDB) sobreescribe el documento cada vez que llega una lectura nueva: si el sensor envía 24°C a las 10:00 y luego 25°C a las 10:05, la lectura de 24°C se pierde para siempre en Orion.
+* Esto es un principio de diseño arquitectónico: un *Context Broker* debe ser ultrarrápido respondiendo al estado actual de millones de entidades, por lo que delegar la persistencia histórica a componentes especializados evita que el broker colapse.
+
+Para análisis forense, gráficas de tendencias, auditoría energética o cálculo de promedios semanales, se requiere una **Base de Datos de Series Temporales (TSDB - Time Series Database)**.
+
+```text
+┌───────────────────────────────┐
+│  ORION CONTEXT BROKER (:1026) │ ◄── Mantiene SOLO el último valor actual
+└───────────────┬───────────────┘
+                │
+                │ Notificación NGSI-v2 reactiva (POST /v2/notify)
+                ▼
+┌───────────────────────────────┐
+│     QUANTUMLEAP (:8668)       │ ◄── Traductor semántico NGSI a registros relacionales
+└───────────────┬───────────────┘
+                │
+                │ Conexión PostgreSQL Wire / HTTP SQL (:4200)
+                ▼
+┌───────────────────────────────┐
+│       CRATEDB (:4200)         │ ◄── Persistencia histórica inmutable con timestamp
+│   Tabla: mtopeniot.etroom     │     (Permite SELECTs temporales, promedios, tendencias)
+└───────────────────────────────┘
+```
+
+---
+
+### 11.2 El Rol de QuantumLeap como Traductor Semántico
+
+**QuantumLeap** (`orchestracities/quantumleap:latest`, puerto `:8668`) es el microservicio oficial del ecosistema FIWARE diseñado específicamente para salvar la brecha entre el modelo de contexto NGSI y los motores de almacenamiento relacional/series temporales.
+
+#### 1. Generación Dinámica de Esquema (*Auto-Schema Mapping*)
+A diferencia de las aplicaciones tradicionales donde un programador debe escribir sentencias `CREATE TABLE`, QuantumLeap inspecciona los payloads de notificación NGSI en tiempo de ejecución y **crea la tabla dinámicamente**:
+* **Nombre de Esquema**: Prefijo `mt` + `fiware-service` en minúsculas ➔ `mtopeniot`.
+* **Nombre de Tabla**: Prefijo `et` + `entity_type` en minúsculas ➔ Si la entidad es de tipo `Room`, la tabla se nombra automáticamente **`etroom`**.
+* **Columnas Creadas Automáticamente**:
+  * `time_index` (`timestamp with time zone`): Momento exacto en que se registró la lectura.
+  * `entity_id` (`string`): Identificador único del nodo (`Room:01:Corner:NW`, `Room:01:Corner:NE`, etc.).
+  * `entity_type` (`string`): Tipo de entidad (`Room`).
+  * `temperature` (`float`): Valor numérico medido por el HDC1080.
+  * `relativehumidity` (`float`): Humedad relativa medida por el HDC1080.
+  * `presence` (`integer`): Detección de ocupación.
+
+#### 2. Suscripción en Orion (`scripts/subscribe_orion.py`)
+Para que Orion alimente a QuantumLeap, se registra una suscripción reactiva:
+```json
+{
+  "description": "Notificar a QuantumLeap para persistencia historica en CrateDB",
+  "subject": {
+    "entities": [{ "idPattern": ".*", "type": "Room" }],
+    "condition": { "attrs": ["temperature", "relativeHumidity"] }
+  },
+  "notification": {
+    "http": { "url": "http://quantumleap:8668/v2/notify" },
+    "attrs": ["temperature", "relativeHumidity", "presence"],
+    "metadata": ["dateCreated", "dateModified"]
+  },
+  "throttling": 1
+}
+```
+
+---
+
+### 11.3 CrateDB: Motor SQL Distribuido de Series Temporales
+
+**CrateDB** (`crate:4.6.8`, puertos `:4200` Web UI y `:5432` PostgreSQL Wire) fue seleccionado sobre bases de datos SQL tradicionales (como PostgreSQL puro o MySQL) por tres ventajas técnicas clave:
+
+1. **Indexación Basada en Apache Lucene**: Cada columna numérica y de texto se indexa automáticamente con un índice invertido, permitiendo agregaciones y filtrado de millones de lecturas de sensores en milisegundos.
+2. **Compatibilidad Nativa con SQL y Postgres Wire**: Permite conectarse mediante cualquier cliente PostgreSQL estándar, dashboards de Grafana o la consola web integrada en el puerto `:4200`.
+3. **Escalabilidad Horizontal Elástica**: Soporta clustering distribuido sin necesidad de configurar particiones manuales complejas de tablas (*sharding* automático).
+
+---
+
+### 11.4 Consultas SQL Clave para la Consola Web de CrateDB (`http://<IP>:4200`)
+
+En la pestaña **Console** de CrateDB, estas son las consultas directas que demuestran el funcionamiento de la persistencia histórica:
+
+#### Consulta 1: Últimas 10 lecturas registradas en la sala
+```sql
+SELECT entity_id, time_index, temperature, relativehumidity 
+FROM mtopeniot.etroom 
+ORDER BY time_index DESC 
+LIMIT 10;
+```
+
+#### Consulta 2: Comparativa de las 4 esquinas en los últimos 2 minutos
+```sql
+SELECT entity_id, temperature, relativehumidity, time_index 
+FROM mtopeniot.etroom 
+WHERE time_index >= NOW() - INTERVAL '2' MINUTE 
+ORDER BY entity_id, time_index DESC;
+```
+
+#### Consulta 3: Agregación estadística histórica por cada esquina (Mín, Máx, Promedio)
+```sql
+SELECT 
+    entity_id AS esquina,
+    count(*) AS total_muestras,
+    round(avg(temperature), 2) AS temp_promedio,
+    min(temperature) AS temp_minima,
+    max(temperature) AS temp_maxima,
+    round(avg(relativehumidity), 2) AS hum_promedio
+FROM mtopeniot.etroom 
+GROUP BY entity_id;
+```
+
+---
+
+## 12. El Origen Telefónica / FIWARE y Referencias de Ingeniería
+
+### 12.1 La Pregunta de Examen: *"¿Qué manual de telefonía usaste?"*
+
+Durante la evaluación de proyectos IoT con FIWARE, los profesores frecuentemente preguntan por *"el manual de Telefónica"* o *"la guía de telecomunicaciones"*. La justificación histórica y técnica formal es la siguiente:
+
+1. **El Rol de Telefónica I+D en FIWARE**:
+   * **FIWARE** nació como el proyecto estandarte de la Comisión Europea dentro del programa **FI-PPP (*Future Internet Public-Private Partnership*)**, con una inversión de más de 300 millones de euros para crear el estándar abierto de Smart Cities e Industria 4.0 de Europa.
+   * La multinacional de telecomunicaciones **Telefónica I+D (Telefónica Investigación y Desarrollo)** lideró el consorcio de ingeniería de software a cargo del núcleo (*Core Platform*).
+   * Telefónica diseñó, programó y mantiene directamente en código abierto los componentes neurálgicos que estamos usando:
+     * **Orion Context Broker**: Creado en C++ por ingenieros de Telefónica I+D (repositorio oficial `telefonicaid/fiware-orion`, imagen Docker `telefonicaiot/fiware-orion`).
+     * **IoT Agent JSON**: Creado en Node.js por Telefónica I+D (repositorio oficial `telefonicaid/iotagent-json`, imagen Docker `telefonicaiot/iotagent-json`).
+     * Por esta razón, todos los contenedores oficiales en Docker Hub llevan el prefijo **`telefonicaiot/*`**.
+
+2. **El Manual Oficial de Referencia**:
+   * El proyecto se basa rigurosamente en la serie canónica **"FIWARE Step-by-Step Tutorials for Smart Cities and IoT"**, redactada por los arquitectos de soluciones de Telefónica y la FIWARE Foundation:
+     * **Tutorial 101**: *Getting Started with Orion Context Broker (Context Data Management)*.
+     * **Tutorial 201**: *Provisioning IoT Devices using IoT Agent for JSON (Southbound Telemetry & Northbound NGSI)*.
+     * **Tutorial 301**: *Persisting Context Data into a Time-Series Database using QuantumLeap and CrateDB*.
+
+---
+
+## 13. Guía Rápida de Sustentación para el Profesor
+
+Esta sección resume las respuestas clave y argumentos técnicos para defender el proyecto con solvencia ante cualquier pregunta del comité evaluador:
+
+### Pregunta 1: *"¿Por qué no conectar los ESP32 directamente a Orion sin usar el IoT Agent?"*
+* **Respuesta:**
+  1. **Seguridad y Principio de Menor Privilegio**: Orion (`:1026`) es el cerebro del sistema y expone operaciones de borrado (`DELETE /v2/entities`), lectura completa y alteración de suscripciones. Exponerlo a sensores en campo permitiría que un sensor comprometido borre toda la sala. El puerto `:7896` del IoT Agent es un *sumidero ciego de ingesta* que solo permite escribir datos para un sensor autenticado con API Key.
+  2. **Eficiencia del Microcontrolador**: Un microcontrolador tiene memoria RAM muy limitada (Heap de ~80 KB en ESP8266 o ~300 KB en ESP32). Armar un JSON verboso NGSI-v2 (`{"temperature": {"type": "Number", "value": 25.5}}`) consume memoria y CPU del micro. Con el IoT Agent, el ESP32 envía un JSON ultraliviano `{"t": 25.5, "h": 58.2}` y el servidor absorbe el costo de estandarización.
+  3. **Multi-tenancy Perimetral**: El IoT Agent valida en el perímetro el `fiware-service` (`openiot`) y la `API_KEY` (`dalet_secret_key`), protegiendo a Orion de peticiones maliciosas o no autorizadas.
+
+---
+
+### Pregunta 2: *"¿Para qué agregaste QuantumLeap y CrateDB si ya tenías MongoDB y SQLite?"*
+* **Respuesta:**
+  * Cada base de datos cumple una **función arquitectónica especializada**:
+    * **MongoDB (dentro de FIWARE):** Almacena **únicamente el estado vivo actual** de Orion Context Broker (sin historial).
+    * **QuantumLeap + CrateDB (Persistencia Histórica):** Almacenan la **serie temporal inmutable completa** de las lecturas de los sensores con indexación distribuida (Apache Lucene), permitiendo graficar tendencias a lo largo de semanas o meses y hacer minería de datos.
+    * **SQLite WAL (dentro del ETL):** Almacena el **resultado de los modelos matemáticos y analíticos en tiempo real** (Índice de Calor NOAA, Punto de Rocío Magnus-Tetens, Gradiente Espacial $\Delta T$ y semáforos de confort) para alimentar rápidamente al dashboard y al asistente de voz Dalet AI sin sobrecargar la base de datos histórica.
+
+---
+
+### Pregunta 3: *"Explícame la ruta completa de un dato desde el sensor físico hasta la pantalla"*
+* **Respuesta en 5 Pasos:**
+  1. **Borde (Edge):** El sensor HDC1080 lee temperatura y humedad mediante bus I2C. El microcontrolador LilyGO ESP32 empaqueta la lectura en un JSON ultraliviano: `{"t": 25.5, "h": 58.2}`.
+  2. **Ingesta:** El ESP32 hace un `POST` HTTP al puerto `:7896` del IoT Agent con los parámetros `?k=dalet_secret_key&i=hdc1080_nw`.
+  3. **Traducción y Broker:** El IoT Agent valida la API Key, mapea `"t"` a `temperature` y `"h"` a `relativeHumidity`, y actualiza mediante `PATCH NGSI-v2` la entidad `Room:01:Corner:NW` en Orion Context Broker (`:1026`).
+  4. **Notificación Doble Reactiva:** Orion guarda el estado presente en MongoDB y dispara dos webhooks paralelos según las suscripciones registradas:
+     * **Hacia QuantumLeap (`:8668`):** Que traduce el evento a un `INSERT` relacional en la tabla `mtopeniot.etroom` de CrateDB (`:4200`).
+     * **Hacia el Worker ETL (`:8000`):** Que recibe el payload NGSI-v2 en `/v1/notify`, evalúa la regresión polinomial de Rothfusz (Sensación Térmica NOAA) y Magnus-Tetens (Punto de Rocío), y actualiza el semáforo de confort en SQLite.
+  5. **Muestra y Decisión:** El usuario final o el Asistente Dalet AI consulta `GET /api/status` o la consola de CrateDB `:4200` y visualiza la sala consolidada con variables de decisión claras.
+
+---
+
+### Resumen de Puertos y Enlaces de Demostración
+
+| Servicio | Puerto | URL de Demostración | Propósito en la Sustentación |
+| :--- | :--- | :--- | :--- |
+| **CrateDB Console** | `4200` | `http://<IP_PUBLICA>:4200` | Demostrar almacenamiento histórico SQL de series temporales (`mtopeniot.etroom`). |
+| **Swagger UI ETL** | `8000` | `http://<IP_PUBLICA>:8000/docs` | Demostrar los contratos de la API y el webhook de Orion. |
+| **ETL Live Status** | `8000` | `http://<IP_PUBLICA>:8000/api/status` | Demostrar las fórmulas de confort (NOAA, Magnus-Tetens, $\Delta T$). |
+| **QuantumLeap Health** | `8668` | `http://<IP_PUBLICA>:8668/health` | Demostrar que el puente Orion-CrateDB está activo. |
+| **Orion Broker** | `1026` | `http://<IP_PUBLICA>:1026/version` | Demostrar el núcleo de contexto de Telefónica / FIWARE. |
+| **IoT Agent Ingesta** | `7896` | `http://<IP_PUBLICA>:7896/iot/json` | Punto seguro de recepción de telemetría de los ESP32. |
+
 
