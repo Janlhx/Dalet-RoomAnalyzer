@@ -86,12 +86,32 @@ services:
       - CRATE_HOST=crate-db
       - USE_GEOCODING=False
 
+  # Grafana Dashboard (Visualización de Series Temporales y Métricas de Sala)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: dalet-grafana
+    restart: always
+    depends_on:
+      - crate-db
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - fiware-net
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+
 volumes:
   mongo-data:
     name: dalet_mongo_data
   crate-data:
     name: dalet_crate_data
+  grafana-data:
+    name: dalet_grafana_data
 
 networks:
   fiware-net:
     name: dalet_fiware_network
+
