@@ -73,7 +73,7 @@ services:
 
   # FIWARE QuantumLeap (Traductor NGSI-v2 a Series Temporales en CrateDB)
   quantumleap:
-    image: smartsdk/quantumleap:0.8.3
+    image: orchestracities/quantumleap:latest
     container_name: dalet-quantumleap
     restart: always
     depends_on:
