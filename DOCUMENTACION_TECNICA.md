@@ -15,6 +15,8 @@
 6. [Capa 5: Infraestructura Cloud en AWS EC2 y Docker Compose](#6-capa-5-infraestructura-cloud-en-aws-ec2-y-docker-compose)
 7. [Catálogo de Tramas y Payloads de Red](#7-catálogo-de-tramas-y-payloads-de-red)
 8. [Manual de Pruebas y Validación con Comandos cURL](#8-manual-de-pruebas-y-validación-con-comandos-curl)
+9. [Core de Seguridad y Cadena de Escritura: ¿Por qué un Agente y no Orion Directo?](#9-core-de-seguridad-y-cadena-de-escritura)
+10. [Mecánica Cloud en AWS y Muestra de Datos](#10-mecánica-cloud-en-aws-y-muestra-de-datos)
 
 ---
 
@@ -501,3 +503,131 @@ curl -X GET http://52.87.246.142:8000/api/status
 ```bash
 curl -X GET "http://52.87.246.142:8000/api/history?limit=10"
 ```
+
+---
+
+## 9. Core de Seguridad y Cadena de Escritura
+
+### 9.1 ¿De dónde es la escritura y quién escribe a quién?
+La escritura de datos en el sistema sigue una **cadena estricta y unidireccional de 5 eslabones**, donde cada componente solo tiene permisos para escribir en el siguiente:
+
+```text
+[ Sensor LilyGO ESP32 ]
+         │ (1) Inicia la escritura de telemetría cruda (HTTP POST)
+         ▼
+[ FIWARE IoT Agent JSON (:7896) ]
+         │ (2) Escribe la entidad normalizada NGSI-v2 (HTTP PATCH)
+         ▼
+[ Orion Context Broker (:1026) ]
+         │ (3) Persiste el estado de contexto vivo (TCP Socket)
+         ▼
+[ MongoDB 5.0 (:27017) ]
+         │
+         │ (4) Orion dispara notificación reactiva /v1/notify (HTTP POST)
+         ▼
+[ Worker ETL FastAPI (:8000) ]
+         │ (5) Escribe métricas físicas y fotos espaciales (SQL INSERT)
+         ▼
+[ SQLite Analítica WAL (dalet_analytics.db) ]
+```
+
+1. **Eslabón 1 (Edge)**: El microcontrolador ESP32 lee el bus I2C y **escribe** por HTTP POST al puerto Southbound `:7896` del IoT Agent.
+2. **Eslabón 2 (Traducción)**: El IoT Agent valida credenciales y **escribe/actualiza** la entidad en Orion mediante `PATCH /v2/entities/Room:01:Corner:XX/attrs`.
+3. **Eslabón 3 (Persistencia de Contexto)**: Orion **escribe** en MongoDB 5.0 para asegurar durabilidad del estado actual.
+4. **Eslabón 4 (Notificación)**: Orion no escribe en la base analítica directamente; delega la analítica disparando un Webhook HTTP POST hacia `/v1/notify` del ETL.
+5. **Eslabón 5 (Persistencia Analítica)**: El Worker ETL calcula las fórmulas y **escribe** en SQLite en modo WAL.
+
+---
+
+### 9.2 El Dilema Arquitectónico: ¿Por qué enviar al IoT Agent y NO directamente a Orion?
+
+> [!IMPORTANT]
+> **Pregunta típica de sustentación**: *"¿Por qué no conectar el ESP32 directamente a Orion si Orion tiene una API REST?"*
+
+Conectar sensores directamente a Orion Context Broker es un **grave antipatrón de arquitectura y seguridad IoT** por 4 razones fundamentales:
+
+#### 1. Principio de Menor Privilegio (*Least Privilege*) y Superficie de Ataque
+* **Orion Context Broker (`:1026`) es el cerebro del sistema**: Expone operaciones de lectura, escritura, creación, modificación de suscripciones y borrado completo de entidades (`DELETE /v2/entities/Room:01`).
+* Si se expusiera el puerto `:1026` a los dispositivos de campo, cualquier microcontrolador comprometido (o un atacante conectado a la misma red Wi-Fi) podría borrar entidades, espiar datos de otras salas o alterar las suscripciones del sistema.
+* En cambio, el **puerto Southbound del IoT Agent (`:7896`) es un sumidero ciego (*Ingestion-only sink*)**:
+  * **No permite leer contexto**.
+  * **No permite borrar entidades**.
+  * **No permite listar otras salas**.
+  * **Solo permite enviar datos** para un dispositivo específico autenticado. Si un atacante compromete un sensor, solo puede enviar números falsos para ese sensor puntual, sin comprometer el broker ni otras salas.
+
+#### 2. Autenticación Robusta por Doble Factor de Dispositivo (`API Key` + `Device ID`)
+* El IoT Agent exige en la URL: `POST /iot/json?k=<API_KEY>&i=<DEVICE_ID>`.
+* Si un paquete no incluye la `API_KEY` correcta aprovisionada (`dalet_secret_key`), la petición es rechazada de inmediato en el perímetro sin consumir CPU ni memoria de Orion ni de la base de datos.
+* Proporciona **Aislamiento Multi-inquilino (*Multi-tenancy*)**: mediante las cabeceras `fiware-service: openiot` y `fiware-servicepath: /`, diferentes facultades, edificios o empresas pueden compartir el mismo cluster de servidores sin que los datos de una sala sean visibles para otra.
+
+#### 3. Desacoplamiento de Protocolos y Eficiencia del Microcontrolador
+* Si el ESP32 hablara con Orion directamente, tendría que construir payloads complejos NGSI-v2:
+  `{"temperature": {"type": "Number", "value": 25.5}, "relativeHumidity": {"type": "Number", "value": 60.0}}`
+  Esto consume valiosa memoria RAM dinámica (Heap) y ciclos de reloj en el microcontrolador.
+* Con el IoT Agent, el microcontrolador envía un JSON ultraliviano: `{"t": 25.5, "h": 60.0}`. El IoT Agent absorbe el costo computacional de normalizar el dato hacia el estándar semántico.
+
+#### 4. Aislamiento Perimetral en Redes Virtuales Docker
+* En nuestro despliegue en AWS:
+  * MongoDB (`:27017`) y la API interna de Orion (`:1026`) viven en una **red virtual privada de Docker (`dalet_fiware_network`)**.
+  * Solo el puerto `:7896` del IoT Agent necesita ser alcanzable por los microcontroladores. Esto aísla el núcleo de datos del tráfico no confiable de internet.
+
+---
+
+## 10. Mecánica Cloud en AWS y Muestra de Datos
+
+### 10.1 Cómo Funciona la Nube en AWS EC2
+
+```text
+       [ INTERNET / HARDWARE ESP32 ]
+                     │
+                     ▼
+       ┌─────────────────────────────────────────────────────────┐
+       │             AWS SECURITY GROUP (Firewall L4)            │
+       │   • 22/TCP   (SSH Admin)                                │
+       │   • 7896/TCP (Ingesta Sensores IoT Agent)               │
+       │   • 8000/TCP (API REST y Swagger ETL)                   │
+       │   • 1026/TCP (Orion NGSI-v2)                            │
+       └─────────────────────────┬───────────────────────────────┘
+                                 │
+                                 ▼
+       ┌─────────────────────────────────────────────────────────┐
+       │             INSTANCIA EC2 (Ubuntu 22.04 LTS)            │
+       │                                                         │
+       │   [ Memoria RAM Física ] ◄──► [ 2 GB SWAP (/swapfile) ] │
+       │                                                         │
+       │   [ Docker Engine + Docker Compose Plugin ]             │
+       │   Red Virtual Bridge (dalet_fiware_network):            │
+       │   • mongo-db:27017      (DNS interno Docker)            │
+       │   • fiware-orion:1026   (DNS interno Docker)            │
+       │   • fiware-iot-agent:4041 & :7896                       │
+       │                                                         │
+       │   [ Worker ETL en Host (:8000) ]                        │
+       │   • Recibe en http://172.31.19.184:8000/v1/notify       │
+       │   • Base de datos analítica local: dalet_analytics.db   │
+       └─────────────────────────────────────────────────────────┘
+```
+
+1. **Firewall Perimetral (AWS Security Groups)**: Filtra el tráfico antes de que toque el sistema operativo de la máquina virtual. Cualquier intento de conexión a puertos no autorizados (como el puerto de MongoDB 27017) es descartado a nivel de hipervisor de AWS.
+2. **Mitigación de Falta de Memoria (Swap de 2 GB)**: En instancias de laboratorio (`t2.micro` o `t3.small` con 1 o 2 GB de RAM), MongoDB y los hilos de notificación de Orion pueden saturar la RAM física. El script `setup_ec2.sh` aprovisiona automáticamente 2 GB de memoria de intercambio en disco SSD (`/swapfile`), garantizando que los contenedores nunca sufran *Out-Of-Memory (OOM) Kill*.
+3. **Resolución DNS Interna de Docker**: Los contenedores se comunican entre sí mediante sus nombres de servicio (`mongo-db`, `fiware-orion`, `fiware-iot-agent-json`), desacoplándolos de las direcciones IP internas de los contenedores que pueden cambiar al reiniciar.
+
+---
+
+### 10.2 La Muestra y Presentación de los Datos
+
+El sistema transforma la telemetría cruda en **información accionable para la toma de decisiones** en 3 capas de presentación:
+
+#### 1. Del Dato Crudo a la Variable de Decisión
+* Un usuario o técnico de sala no toma decisiones con `{"t": 25.8, "h": 61.2}`.
+* El sistema enriquece el dato y lo convierte en:
+  * **Estrés Térmico Humano**: *Sensación térmica real de 26.5°C*.
+  * **Salud del Hardware**: *Punto de rocío a 16.8°C (margen seguro de 9°C contra condensación)*.
+  * **Homogeneidad de la Sala**: *Gradiente espacial $\Delta T = 1.41^\circ\text{C}$ (homogéneo, sin bolsas de calor)*.
+  * **Identificación de Puntos Críticos**: *Hotspot en Noroeste (Ventana) vs Coldspot en Noreste (Puerta)*.
+  * **Semáforo Determinista**: *Color Amarillo (`WARNING`) por sensación ligeramente cálida*.
+
+#### 2. Canales de Exposición de Datos
+* **Canal 1: API REST (`/api/status` y `/api/history`)**: Formato JSON estructurado para el Frontend Web (Dashboard de Gestión y Usuario).
+* **Canal 2: Documentación Interactiva Swagger UI (`/docs`)**: Permite a desarrolladores, auditores y evaluadores probar los contratos de datos en vivo sin escribir código.
+* **Canal 3: Asistente por Voz con IA (Dalet AI)**: En la siguiente fase, el asistente conversacional invocará mediante *Tool Calling* el endpoint `GET /api/status`, interpretará el JSON en lenguaje natural y le responderá al usuario por voz con Edge-TTS: *"La sala está en 25 grados con sensación de 26. Hay buena distribución entre las esquinas, pero recomiendo abrir la ventilación en la ventana Noroeste"*.
+
