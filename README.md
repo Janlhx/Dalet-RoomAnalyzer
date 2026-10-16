@@ -80,10 +80,12 @@ En la raíz del proyecto, ejecuta:
 ```bash
 docker compose up -d
 ```
-Esto levantará tres contenedores:
+Esto levantará los cinco contenedores del ecosistema FIWARE:
 * `dalet-mongo` (`:27017`): MongoDB para persistencia de Orion e IoT Agent.
 * `dalet-orion` (`:1026`): FIWARE Orion Context Broker.
 * `dalet-iot-agent-json` (`:4041` gestión, `:7896` telemetría).
+* `dalet-crate-db` (`:4200` Web Admin UI, `:5432` PostgreSQL protocol): Persistencia de series temporales.
+* `dalet-quantumleap` (`:8668`): Traductor NGSI-v2 a CrateDB.
 
 Verifica que estén saludables:
 ```bash

@@ -55,9 +55,42 @@ services:
       - IOTA_AUTOCACHE=true
       - IOTA_LOG_LEVEL=INFO
 
+  # Base de Datos CrateDB (Persistencia Histórica de Series Temporales FIWARE)
+  crate-db:
+    image: crate:4.6.8
+    container_name: dalet-crate-db
+    restart: always
+    ports:
+      - "${CRATE_PORT:-4200}:4200" # CrateDB Web Admin UI / HTTP API
+      - "5432:5432"               # Protocolo PostgreSQL Wire
+    networks:
+      - fiware-net
+    volumes:
+      - crate-data:/data
+    command: -Cdiscovery.type=single-node -Ccluster.name=democluster -Chttp.cors.enabled=true -Chttp.cors.allow-origin="*"
+    environment:
+      - CRATE_HEAP_SIZE=512m
+
+  # FIWARE QuantumLeap (Traductor NGSI-v2 a Series Temporales en CrateDB)
+  quantumleap:
+    image: smartsdk/quantumleap:0.8.3
+    container_name: dalet-quantumleap
+    restart: always
+    depends_on:
+      - crate-db
+    ports:
+      - "${QUANTUMLEAP_PORT:-8668}:8668" # API REST de QuantumLeap
+    networks:
+      - fiware-net
+    environment:
+      - CRATE_HOST=crate-db
+      - USE_GEOCODING=False
+
 volumes:
   mongo-data:
     name: dalet_mongo_data
+  crate-data:
+    name: dalet_crate_data
 
 networks:
   fiware-net:

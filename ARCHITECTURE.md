@@ -69,17 +69,19 @@ Cada microcontrolador implementa un diseño dual para satisfacer diagnósticos d
   • Entidades vivas de cada esquina (Room:01:Corner:NW/NE/SW/SE)
   • Persistencia inmediata en MongoDB (:27017)
        │
-       │ 3. Notificación automática vía Suscripción (Webhook)
-       ▼
-[ PIPELINE ETL (Python) ]
-  • EXTRACT: Recibe payload NGSI-v2 de Orion (/v1/notify)
-  • TRANSFORM:
-    - Sensación térmica / Heat Index individual y global (Fórmula Rothfusz/NOAA)
-    - Punto de Rocío (Dew Point - Magnus-Tetens)
-    - Gradiente térmico espacial (ΔT = Tmax - Tmin)
-    - Tasa de variación temporal (ΔT / Δt > 2°C en 5 min)
-    - Clasificación de confort y balance térmico
-  • LOAD: Guarda en DB analítica (SQLite WAL / TimescaleDB)
+       ├──► 3a. Suscripción a QUANTUMLEAP (:8668) ──► CRATEDB (:4200)
+       │          • Persistencia canónica de Series Temporales (Time-Series)
+       │          • Consola Web SQL en CrateDB (:4200)
+       │
+       └──► 3b. Suscripción a PIPELINE ETL (FastAPI :8000)
+                  • EXTRACT: Recibe payload NGSI-v2 de Orion (/v1/notify)
+                  • TRANSFORM:
+                    - Sensación térmica / Heat Index (Fórmula Rothfusz/NOAA)
+                    - Punto de Rocío (Dew Point - Magnus-Tetens)
+                    - Gradiente térmico espacial (ΔT = Tmax - Tmin)
+                    - Tasa de variación temporal (ΔT / Δt > 2°C en 5 min)
+                    - Clasificación de confort y balance térmico
+                  • LOAD: Guarda en DB analítica (SQLite WAL) y alimenta a Dalet AI
        │
        ├──► [ MOTOR TOMA DECISIONES ]
        │      • Reglas de balance térmico (alertas de ventana abierta, AC insuficiente)
