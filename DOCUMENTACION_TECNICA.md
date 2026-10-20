@@ -20,6 +20,7 @@
 11. [Capa 6: Persistencia Histórica de Series Temporales (QuantumLeap y CrateDB)](#11-capa-6-persistencia-histórica-de-series-temporales-quantumleap-y-cratedb)
 12. [El Origen Telefónica / FIWARE y Referencias de Ingeniería](#12-el-origen-telefónica--fiware-y-referencias-de-ingeniería)
 13. [Guía Rápida de Sustentación para el Profesor](#13-guía-rápida-de-sustentación-para-el-profesor)
+14. [Toma de Decisiones y Alertas Reactivas: Escenario #2 (Orion + Flask)](#14-toma-de-decisiones-y-alertas-reactivas-escenario-2-orion--flask)
 
 ---
 
@@ -811,10 +812,114 @@ Esta sección resume las respuestas clave y argumentos técnicos para defender e
 | Servicio | Puerto | URL de Demostración | Propósito en la Sustentación |
 | :--- | :--- | :--- | :--- |
 | **CrateDB Console** | `4200` | `http://<IP_PUBLICA>:4200` | Demostrar almacenamiento histórico SQL de series temporales (`mtopeniot.etroom`). |
+| **Grafana Dashboard** | `3000` | `http://<IP_PUBLICA>:3000` | Visualización en vivo de métricas y gráficos temporales de las 4 esquinas. |
 | **Swagger UI ETL** | `8000` | `http://<IP_PUBLICA>:8000/docs` | Demostrar los contratos de la API y el webhook de Orion. |
 | **ETL Live Status** | `8000` | `http://<IP_PUBLICA>:8000/api/status` | Demostrar las fórmulas de confort (NOAA, Magnus-Tetens, $\Delta T$). |
+| **Monitor Alertas Flask** | `5000` | `http://<IP_PUBLICA>:5000/` | Panel visual de eventos y toma de decisiones reactiva (Escenario #2). |
 | **QuantumLeap Health** | `8668` | `http://<IP_PUBLICA>:8668/health` | Demostrar que el puente Orion-CrateDB está activo. |
 | **Orion Broker** | `1026` | `http://<IP_PUBLICA>:1026/version` | Demostrar el núcleo de contexto de Telefónica / FIWARE. |
 | **IoT Agent Ingesta** | `7896` | `http://<IP_PUBLICA>:7896/iot/json` | Punto seguro de recepción de telemetría de los ESP32. |
+
+---
+
+## 14. Toma de Decisiones y Alertas Reactivas: Escenario #2 (Orion + Flask)
+
+### 14.1 Fundamento del Problema Planteado en Clase
+
+En la arquitectura de referencia de un sistema IoT inteligente, existen dos patrones para la toma de decisiones:
+1. **Analítica en Lote (*Batch / Crontab / ETL*)**: Procesos periódicos que consultan bases de datos históricas (CrateDB/DWH) para generar reportes consolidados cada hora o día.
+2. **Alertas Reactivas en Tiempo Real**: Notificaciones inmediatas disparadas cuando una variable crítica cruza un umbral de seguridad:
+   $$\text{Condición: } t > x^\circ\text{C} \implies \begin{cases} \text{SÍ} & \longrightarrow \text{Disparar Notificación y Acción Correctiva} \\ \text{NO} & \longrightarrow \text{Nada (Silencio de Red)} \end{cases}$$
+
+### 14.2 Evaluación de los 3 Escenarios del Tablero
+
+```text
+ ┌─────────────────────────────────────────────────────────────────────────────┐
+ │                      COMPARATIVA DE LOS 3 ESCENARIOS                        │
+ ├─────────────┬─────────────────────────────────┬─────────────────────────────┤
+ │ Escenario   │ Arquitectura Técnica            │ Evaluación de Viabilidad   │
+ ├─────────────┼─────────────────────────────────┼─────────────────────────────┤
+ │ Escenario 1 │ Message Driver custom           │ Complejidad alta: mantener  │
+ │             │ vía WebSockets directos         │ conexiones stateful y recon.│
+ ├─────────────┼─────────────────────────────────┼─────────────────────────────┤
+ │ Escenario 2 │ Orion Context Broker            │ ✅ SELECCIONADO Y RECOMEND. │
+ │ (Marcado ①) │ Suscripción Condicional NGSI-v2 │ Eficiencia máxima: Orion    │
+ │             │ hacia Servidor Flask en Docker  │ filtra con C++ en el núcleo │
+ ├─────────────┼─────────────────────────────────┼─────────────────────────────┤
+ │ Escenario 3 │ Broker Comercial                │ Sobrecarga de infraestructura│
+ │             │ MQTT externo / Apache Kafka     │ innecesaria para sala IoT   │
+ └─────────────┴─────────────────────────────────┴─────────────────────────────┘
+```
+
+El **Escenario #2** es el patrón óptimo de ingeniería porque:
+* **Orion asume la carga de monitoreo constante**: El microservicio receptor de alertas no tiene que hacer *polling* ni bucles infinitos comparando temperaturas.
+* **Cero consumo de red en condiciones normales**: Mientras la temperatura de las 4 esquinas se mantenga $\le x^\circ\text{C}$, Orion no emite un solo paquete HTTP.
+* **Desacoplamiento total**: El servidor en Flask se enfoca puramente en la **toma de decisiones** (determinar la severidad y la acción de mitigación correspondiente).
+
+---
+
+### 14.3 Estructura de la Suscripción Condicional en Orion
+
+Para registrar la regla en Orion Context Broker, se envía una petición `POST` al endpoint `/v2/subscriptions` con el bloque `condition.expression.q`:
+
+```json
+{
+  "description": "Alerta Reactiva Escenario #2: Disparar solo si temperature > 26.0",
+  "subject": {
+    "entities": [
+      {
+        "idPattern": ".*",
+        "type": "Room"
+      }
+    ],
+    "condition": {
+      "attrs": ["temperature"],
+      "expression": {
+        "q": "temperature>26.0"
+      }
+    }
+  },
+  "notification": {
+    "http": {
+      "url": "http://<IP_HOST>:5000/alerta"
+    },
+    "attrs": [
+      "temperature",
+      "relativeHumidity",
+      "presence",
+      "cornerLabel",
+      "cornerCode"
+    ]
+  }
+}
+```
+
+* **Script de Registro Automático**: `scripts/subscribe_alerts.py --threshold 26.0 --alert-url http://<IP>:5000/alerta`.
+
+---
+
+### 14.4 Matriz de Toma de Decisiones por Esquina (Servidor Flask)
+
+El microservicio implementado en `alerts/app.py` recibe el payload NGSI-v2 en el endpoint `POST /alerta` y ejecuta la matriz de decisiones automatizada:
+
+| Esquina / Entidad | Variable Afectada | Acción / Decisión de Mitigación Recomendada |
+| :--- | :--- | :--- |
+| `Room:01:Corner:NW` | Ventana / Fachada | *Abrir celosías o activar extractor para reducir la radiación solar incidente.* |
+| `Room:01:Corner:NE` | Puerta de Acceso | *Verificar cierre hermético para evitar ingreso de corrientes de aire cálido exterior.* |
+| `Room:01:Corner:SW` | Zona de Servidores | *¡CRÍTICO! Aumentar velocidad de ventiladores de rack o redistribuir carga de cómputo.* |
+| `Room:01:Corner:SE` | Zona Climatizada | *Reducir consigna de termostato del sistema de aire acondicionado (HVAC).* |
+
+---
+
+### 14.5 Panel Visual Integrado y Dockerización
+
+1. **Dashboard Visual Web (`http://<IP>:5000/`)**:
+   * Interfaz oscura moderna (*Tailwind CSS*) con auto-refresco cada 5 segundos.
+   * Contador de eventos reactivos notificados por Orion.
+   * Registro cronológico con indicador de severidad (`ADVERTENCIA` para $26^\circ\text{C} \le t < 28^\circ\text{C}$ y `CRÍTICA` para $t \ge 28^\circ\text{C}$) y la acción de mitigación dictada.
+2. **API REST JSON (`http://<IP>:5000/api/alertas`)**:
+   * Retorna el histórico estructurado de decisiones para consumo del Frontend o el Asistente Dalet AI.
+3. **Contenedor Docker (`alerts/Dockerfile`)**:
+   * Imagen basada en `python:3.10-slim` lista para orquestar con `docker compose`.
 
 
