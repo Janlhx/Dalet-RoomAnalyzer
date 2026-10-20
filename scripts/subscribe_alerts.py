@@ -35,7 +35,7 @@ def subscribe_conditional_alerts(orion_url: str, alert_url: str, threshold: floa
     print(f"\n🚨 Creando Suscripción Condicional en Orion (Escenario #2: t > {threshold} °C)...")
     
     payload = {
-        "description": f"Alerta Reactiva Escenario #2: Disparar solo si temperature > {threshold}",
+        "description": "Alerta Reactiva Escenario 2 Umbral Termico",
         "subject": {
             "entities": [
                 {
